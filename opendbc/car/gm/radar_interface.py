@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+from enum import IntFlag
 from opendbc.can import CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
@@ -14,6 +15,15 @@ NUM_SLOTS = 20
 # Actually it's 0x47f, but can parser only reports
 # messages that are present in DBC
 LAST_RADAR_MSG = RADAR_HEADER_MSG + NUM_SLOTS
+
+
+class GMRadarFaultBit(IntFlag):
+  SENSOR_BLOCKED = 1 << 0          # FLRRSnsrBlckd
+  SENSITIVITY = 1 << 1             # FLRRSnstvFltPrsntInt
+  YAW_RATE_PLAUSIBILITY = 1 << 2   # FLRRYawRtPlsblityFlt
+  HARDWARE = 1 << 3                # FLRRHWFltPrsntInt
+  ANTENNA_TUNING = 1 << 4          # FLRRAntTngFltPrsnt
+  ALIGNMENT = 1 << 5               # FLRRAlgnFltPrsnt
 
 
 def create_radar_can_parser(car_fingerprint):
@@ -54,16 +64,32 @@ class RadarInterface(RadarInterfaceBase):
 
     ret = structs.RadarData()
     header = self.rcp.vl[RADAR_HEADER_MSG]
-    fault = header['FLRRSnsrBlckd'] or header['FLRRSnstvFltPrsntInt'] or \
-      header['FLRRYawRtPlsblityFlt'] or header['FLRRHWFltPrsntInt'] or \
-      header['FLRRAntTngFltPrsnt'] or header['FLRRAlgnFltPrsnt']
+
+    fault_bits = GMRadarFaultBit(0)
+    if header['FLRRSnsrBlckd']:
+      fault_bits |= GMRadarFaultBit.SENSOR_BLOCKED
+    if header['FLRRSnstvFltPrsntInt']:
+      fault_bits |= GMRadarFaultBit.SENSITIVITY
+    if header['FLRRYawRtPlsblityFlt']:
+      fault_bits |= GMRadarFaultBit.YAW_RATE_PLAUSIBILITY
+    if header['FLRRHWFltPrsntInt']:
+      fault_bits |= GMRadarFaultBit.HARDWARE
+    if header['FLRRAntTngFltPrsnt']:
+      fault_bits |= GMRadarFaultBit.ANTENNA_TUNING
+    if header['FLRRAlgnFltPrsnt']:
+      fault_bits |= GMRadarFaultBit.ALIGNMENT
+
     if not self.rcp.can_valid:
       ret.errors.canError = True
-    if fault:
-      ret.errors.radarFault = True
+    if fault_bits:
+      # Radar self-reports a recoverable fault (e.g. blocked by dirt/rain, temporary
+      # misalignment). Don't disable the car - ignore its points this cycle and let
+      # the vision-based lead tracking in radard.py take over until it clears on its own.
+      ret.errors.radarDegraded = True
+      ret.errors.radarDegradedReasons = int(fault_bits)
 
     currentTargets = set()
-    num_targets = header['FLRRNumValidTargets']
+    num_targets = 0 if fault_bits else header['FLRRNumValidTargets']
 
     # Not all radar messages describe targets,
     # no need to monitor all of the self.rcp.msgs_upd

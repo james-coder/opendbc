@@ -306,6 +306,8 @@ struct RadarData @0x888ad6581cf0aacb {
     radarFault @1 :Bool;
     wrongConfig @2 :Bool;
     radarUnavailableTemporary @3 :Bool;  # radar data is temporarily unavailable due to conditions the car sets
+    radarDegraded @4 :Bool;              # radar self-reports a recoverable fault; car ignores its points this cycle but does not disable
+    radarDegradedReasons @5 :UInt8;      # car-specific bitmask of degraded-condition reasons; see the car's radar_interface.py for bit meanings
   }
 
   # similar to LiveTracks
