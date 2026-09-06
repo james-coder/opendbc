@@ -3,9 +3,28 @@ from opendbc.car.can_definitions import CanData
 from opendbc.car.car_helpers import FRAME_FINGERPRINT, can_fingerprint
 from opendbc.car.fingerprints import _FINGERPRINTS as FINGERPRINTS
 from opendbc.testing import parameterized
+from opendbc.car.fingerprints import eliminate_incompatible_cars
+from opendbc.car.gm.values import CAR as GM
 
 
 class TestCanFingerprint(unittest.TestCase):
+  def test_gm_identification_request_does_not_eliminate_volt(self):
+    expected = GM.CHEVROLET_VOLT
+    request = CanData(0x7e3, b'\x02\x1a\xb0\x00\x00\x00\x00\x00', 0)
+    can = [CanData(a, b'\x00' * n, 0) for a, n in FINGERPRINTS[expected][0].items()] + [request]
+    found, raw = can_fingerprint(lambda **kwargs: [can])
+    assert found == expected
+    assert raw[0][0x7e3] == 8
+
+  def test_gm_diagnostic_exception_is_narrow(self):
+    payload = b'\x02\x1a\xb0\x00\x00\x00\x00\x00'
+    for address, data, bus in [(0x7e5, payload, 0), (0x7e3, payload, 1),
+                               (0x7e3, payload[:3], 0), (0x7e3, b'\x03' + payload[1:], 0),
+                               (0x7e3, b'\x02\x22' + payload[2:], 0)]:
+      assert not eliminate_incompatible_cars(CanData(address, data, bus), [GM.CHEVROLET_VOLT])
+    other = next(c for c, fps in FINGERPRINTS.items() if c not in GM and all(0x7e3 not in fp for fp in fps))
+    assert not eliminate_incompatible_cars(CanData(0x7e3, payload, 0), [other])
+
   @parameterized("car_model, fingerprints", FINGERPRINTS.items())
   def test_can_fingerprint(self, car_model, fingerprints):
     """Tests online fingerprinting function on offline fingerprints"""

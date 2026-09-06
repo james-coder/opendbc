@@ -38,6 +38,13 @@ def eliminate_incompatible_cars(msg, candidate_cars):
   compatible_cars = []
 
   for car_name in candidate_cars:
+    # An identification request can appear during GM fingerprinting (observed:
+    # 0x7e3, 02 1a b0 00 00 00 00 00). Keep the raw frame for diagnostics, but
+    # don't use this well-formed ISO-TP request to eliminate GM candidates.
+    if (car_name in GM and msg.src == 0 and msg.address == 0x7e3 and len(msg.dat) == 8
+        and msg.dat[:2] == b'\x02\x1a'):
+      compatible_cars.append(car_name)
+      continue
     car_fingerprints = _FINGERPRINTS[car_name]
 
     for fingerprint in car_fingerprints:
