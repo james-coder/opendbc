@@ -45,18 +45,42 @@ def test_flags_are_scoped_to_the_bypassed_volt_installation():
   assert not enabled(cp)
 
 
-def test_regen_fallback_waits_for_persistent_response_and_resets():
+def test_regen_observer_allows_actuator_lag_then_corrects_continuously():
   response = RegenResponse()
-  for _ in range(19):
+  for _ in range(10):
     assert response.update(-1., 0., 5., True, .04) == 1.
-  for _ in range(80):
-    response.update(-1., 0., 5., True, .04)
+  scales = [response.update(-1., 0., 5., True, .04) for _ in range(100)]
+  assert all(0 <= a - b <= .75 * .04 + 1e-8 for a, b in zip(scales, scales[1:], strict=False))
   assert response.scale == 0.
-  for _ in range(50):
+  for _ in range(120):
     response.update(-1., -2., 5., True, .04)
   assert response.scale == 1.
   response.update(0., 0., 0., False, .04)
   assert response.scale == 1. and response.previous is None
+
+
+def test_regen_observer_does_not_penalize_expected_pressure_response():
+  response = RegenResponse()
+  for _ in range(100):
+    response.update(-1., response.expected, 5., True, .04)
+  assert response.scale == 1.
+
+
+def test_regen_fade_is_anticipated_before_capacity_disappears():
+  p = CarControllerParams(CarInterface.get_non_essential_params(CAR.CHEVROLET_VOLT))
+  profile = replace(PROFILE, regen=tuple(min(1., v / 5) for v in PROFILE.speed))
+  now = allocate(-1., 2., p, profile=profile, engine_running=False)
+  approaching = allocate(-1., 2., p, profile=profile, measured_accel=-1., engine_running=False)
+  assert approaching[1] > now[1]
+
+
+def test_supervised_test_selection_requires_qualification_and_keeps_road_validation_separate():
+  cp = CarInterface.get_non_essential_params(CAR.CHEVROLET_VOLT)
+  assert configure(cp, 'test') == 'stock'
+  assert configure(cp, 'test', test_ready=True) == 'test'
+  assert cp.flags & VoltFlags.TEST
+  assert configure(cp, 'personal', test_ready=True) == 'stock'
+  assert not cp.flags & VoltFlags.TEST
 
 
 def test_speed_dependent_friction_calibration_is_bounded():

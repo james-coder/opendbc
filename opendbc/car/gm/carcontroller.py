@@ -105,6 +105,7 @@ class CarController(CarControllerBase):
             actuators.accel, CS.out.vEgo, self.params, stopping=stopping, standstill=CS.out.standstill,
             engine_running=getattr(CS, 'volt_engine_running', None),
             profile=self.volt_profile,
+            measured_accel=CS.out.aEgo,
             regen_scale=regen_scale,
             pitch=CC.orientationNED[1] if len(CC.orientationNED) == 3 else 0.)
         elif volt_longitudinal.enabled(self.CP):

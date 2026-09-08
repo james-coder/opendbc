@@ -5,6 +5,7 @@ and physical validation status live with the profile, not in panda safety flags.
 """
 
 from dataclasses import dataclass
+from collections import deque
 from enum import IntFlag
 import math
 import numpy as np
@@ -15,6 +16,7 @@ from opendbc.car.gm.values import CAR
 class VoltFlags(IntFlag):
   SMOOTH = 1 << 16
   PERSONAL = 1 << 17
+  TEST = 1 << 18
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,8 @@ class VoltProfile:
   brake_gain: float = 0.008518798
   brake_gain_speed: tuple = ()
   brake_deadband: float = 0.0
+  brake_power: float = 1.0
+  response_horizon: float = 0.4
   integral_limit: float = 0.45
   braking_ki: float = 0.35
   stop_speed: tuple = (0.0, 0.5, 1.0)
@@ -46,31 +50,37 @@ PROFILE = VoltProfile()
 
 
 class RegenResponse:
-  """Bounded loss-of-regen fallback after persistent, settled response shortfall.
+  """Compare measured response with delayed demand before reducing regen credit.
 
-  This does not estimate battery state. It reduces credited regen only after
-  measured deceleration fails to follow a stable braking command for 0.8 s.
+  The delay/filter avoids treating normal pressure buildup as missing regen.
+  Correction is continuous in deceleration error, without a late step after a
+  fixed settled-command timer. This is a response observer, not battery sensing.
   """
   def __init__(self):
     self.scale = 1.0
     self.deficit_time = 0.0
     self.previous = None
+    self.history = deque()
+    self.expected = 0.
 
   def update(self, requested, measured, speed, active, dt):
     if not active:
       self.__init__()
       return self.scale
-    stable = self.previous is not None and abs(requested - self.previous) <= 1.25 * dt
+    if not all(math.isfinite(x) for x in (requested, measured, speed, dt)) or dt <= 0:
+      return self.scale
+    self.history.append(requested)
+    delayed = self.history.popleft() if len(self.history) > max(1, round(.4 / dt)) else 0.
+    self.expected += dt / (.2 + dt) * (delayed - self.expected)
     self.previous = requested
-    error = measured - requested
-    if speed >= 1.5 and requested < -0.2 and stable and error > 0.35:
+    error = measured - self.expected
+    if speed >= .5 and requested < -.2 and self.expected < -.2 and error > .15:
       self.deficit_time += dt
-      if self.deficit_time >= 0.8:
-        self.scale = max(0.0, self.scale - 0.75 * dt)
+      self.scale = max(0., self.scale - min(.75, .6 * (error - .15)) * dt)
     else:
       self.deficit_time = 0.0
-    if requested < -0.2 and error < -0.35:
-      self.scale = min(1.0, self.scale + 0.5 * dt)
+    if requested < -.2 and error < -.35:
+      self.scale = min(1., self.scale + min(.5, .4 * (-error - .35)) * dt)
     return self.scale
 
 
@@ -91,6 +101,8 @@ def profile_valid(profile=PROFILE):
         profile.brake_gain,
         *profile.brake_gain_speed,
         profile.brake_deadband,
+        profile.brake_power,
+        profile.response_horizon,
         profile.integral_limit,
         profile.braking_ki,
         profile.stop_distance,
@@ -109,6 +121,8 @@ def profile_valid(profile=PROFILE):
     and (not profile.brake_gain_speed or len(profile.brake_gain_speed) == len(profile.speed)
          and all(0.001 <= value <= 0.05 for value in profile.brake_gain_speed))
     and 0 <= profile.brake_deadband <= 60
+    and 1 <= profile.brake_power <= 3
+    and 0 <= profile.response_horizon <= .6
     and 0 <= profile.integral_limit <= 0.6
     and 0 <= profile.braking_ki <= 1
     and 4.5 <= profile.stop_distance <= 8
@@ -116,7 +130,7 @@ def profile_valid(profile=PROFILE):
     and 0.5 <= profile.jerk_scale <= 3
     and len(profile.stop_speed) == len(profile.stop_decel) >= 2
     and all(a < b for a, b in zip(profile.stop_speed, profile.stop_speed[1:], strict=False))
-    and all(0.1 <= x <= 1.2 for x in profile.stop_decel)
+    and all(0.1 <= x <= 2.5 for x in profile.stop_decel)
   )
 
 
@@ -128,21 +142,25 @@ def personal_enabled(CP):
   return enabled(CP) and bool(CP.flags & VoltFlags.PERSONAL) and PROFILE.personal_validated
 
 
-def configure(CP, mode):
+def configure(CP, mode, *, profile=PROFILE, test_ready=False):
   """Called once before CarParams is published; CC retains this same CP object."""
   if not supported(CP):
     return "stock"
-  CP.flags &= ~int(VoltFlags.SMOOTH | VoltFlags.PERSONAL)
-  if mode in ("smooth", "personal") and PROFILE.validated and profile_valid():
+  CP.flags &= ~int(VoltFlags.SMOOTH | VoltFlags.PERSONAL | VoltFlags.TEST)
+  if mode == 'test' and test_ready and profile_valid(profile):
+    CP.flags |= int(VoltFlags.SMOOTH | VoltFlags.PERSONAL | VoltFlags.TEST)
+    return 'test'
+  if mode in ("smooth", "personal") and profile.validated and profile_valid(profile):
     CP.flags |= int(VoltFlags.SMOOTH)
-    if mode == "personal" and PROFILE.personal_validated:
+    if mode == "personal" and profile.personal_validated:
       CP.flags |= int(VoltFlags.PERSONAL)
       return "personal"
     return "smooth"
   return "stock"
 
 
-def allocate(accel, speed, params, *, stopping=False, standstill=False, engine_running=None, pitch=0.0, profile=PROFILE, regen_scale=1.0):
+def allocate(accel, speed, params, *, stopping=False, standstill=False, engine_running=None, pitch=0.0, profile=PROFILE, regen_scale=1.0,
+             measured_accel=0.0):
   """Return gas/regen and friction commands within existing panda limits.
 
   Friction supplies the shortfall as regeneration vanishes. Engine state is
@@ -151,7 +169,8 @@ def allocate(accel, speed, params, *, stopping=False, standstill=False, engine_r
   """
   accel = float(np.clip(accel, params.ACCEL_MIN, params.ACCEL_MAX))
   speed = max(0.0, speed)
-  regen = float(np.interp(speed, profile.speed, profile.regen))
+  predicted_speed = max(0., speed + min(0., measured_accel) * profile.response_horizon) if math.isfinite(measured_accel) else speed
+  regen = float(np.interp(predicted_speed, profile.speed, profile.regen))
   regen *= float(np.clip(regen_scale, 0., 1.))
   if engine_running is not False:
     regen *= 0.5
@@ -162,8 +181,11 @@ def allocate(accel, speed, params, *, stopping=False, standstill=False, engine_r
   demand = accel - creep * float(np.interp(accel, [0.0, 0.2], [1.0, 0.0])) + gravity
   gas = float(np.interp(demand, [-max(regen, 0.001), 0.0, params.ACCEL_MAX], [params.MAX_ACC_REGEN, 0.0, params.MAX_GAS]))
   friction = max(0.0, -demand - regen)
-  gain = float(np.interp(speed, profile.speed, profile.brake_gain_speed)) if profile.brake_gain_speed else profile.brake_gain
-  brake = int(round(friction / gain + (profile.brake_deadband if friction > 0 else 0.)))
+  # Pressure will build after the vehicle has slowed. Using the present speed
+  # here overcommands friction as the low-speed pressure gain rises.
+  gain = float(np.interp(predicted_speed, profile.speed, profile.brake_gain_speed)) if profile.brake_gain_speed else profile.brake_gain
+  exponent = 1 + (profile.brake_power - 1) * min(1., predicted_speed / 3.)
+  brake = int(round(400 * (friction / (400 * gain)) ** (1 / exponent) + (profile.brake_deadband if friction > 0 else 0.)))
   if stopping:
     gas = params.INACTIVE_REGEN
   if standstill and stopping:
