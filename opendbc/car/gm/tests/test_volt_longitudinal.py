@@ -96,3 +96,14 @@ def test_speed_dependent_friction_calibration_is_bounded():
         gas, brake = allocate(-4. + i * .01, speed, params, profile=profile, regen_scale=scale)
         assert -650 <= gas <= 1018 and 0 <= brake <= previous
         previous = brake
+
+
+def test_hold_needs_stationary_wheels_and_restarts_on_motion_or_override():
+  from opendbc.car.gm.volt_longitudinal import VoltHold
+  hold = VoltHold()
+  assert not any(hold.update(True, .06, True, .04) for _ in range(20))
+  assert not any(hold.update(True, 0., True, .04) for _ in range(4))
+  assert hold.update(True, 0., True, .04)
+  assert not hold.update(True, 0., False, .04)
+  assert not hold.update(False, 0., True, .04)
+  assert not hold.update(True, float('nan'), True, .04)
