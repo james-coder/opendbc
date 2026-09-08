@@ -2,7 +2,7 @@ import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.lateral import apply_driver_steer_torque_limits
-from opendbc.car.gm import gmcan
+from opendbc.car.gm import gmcan, volt_longitudinal
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm.values import DBC, CanBus, CarControllerParams, CruiseButtons
 from opendbc.car.interfaces import CarControllerBase
@@ -96,6 +96,12 @@ class CarController(CarControllerBase):
           # FIXME: brakes aren't applied immediately when enabling at a stop
           if stopping:
             self.apply_gas = self.params.INACTIVE_REGEN
+
+        if CC.longActive and volt_longitudinal.enabled(self.CP):
+          self.apply_gas, self.apply_brake = volt_longitudinal.allocate(
+            actuators.accel, CS.out.vEgo, self.params, stopping=stopping, standstill=CS.out.standstill,
+            engine_running=getattr(CS, 'volt_engine_running', None),
+            pitch=CC.orientationNED[1] if len(CC.orientationNED) == 3 else 0.)
 
         idx = (self.frame // 4) % 4
 
