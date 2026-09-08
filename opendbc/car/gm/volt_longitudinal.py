@@ -50,6 +50,16 @@ class VoltProfile:
 PROFILE = VoltProfile()
 
 
+class VoltHold:
+  """Confirm stationary wheels before the personal candidate's hold transition."""
+  def __init__(self):
+    self.elapsed = 0.
+
+  def update(self, standstill, raw_speed, active, dt):
+    self.elapsed = self.elapsed + dt if active and standstill and math.isfinite(raw_speed) and abs(raw_speed) < .03 else 0.
+    return self.elapsed >= .2-1e-9
+
+
 class RegenResponse:
   """Compare measured response with delayed demand before reducing regen credit.
 
