@@ -33,6 +33,7 @@ class VoltProfile:
   creep: tuple = (0.400838, 0.275838, 0.150838, 0.025838, 0.0, 0.0, 0.0, 0.0, 0.0)
   brake_gain: float = 0.008518798
   brake_gain_speed: tuple = ()
+  brake_regen: tuple = ()
   brake_deadband: float = 0.0
   brake_power: float = 1.0
   response_horizon: float = 0.4
@@ -51,13 +52,24 @@ PROFILE = VoltProfile()
 
 
 class VoltHold:
-  """Confirm stationary wheels before the personal candidate's hold transition."""
+  """Retain holding demand independently of the confirmed-stop CAN flag."""
   def __init__(self):
     self.elapsed = 0.
+    self.preload = self.holding = False
 
-  def update(self, standstill, raw_speed, active, dt):
-    self.elapsed = self.elapsed + dt if active and standstill and math.isfinite(raw_speed) and abs(raw_speed) < .03 else 0.
-    return self.elapsed >= .2-1e-9
+  def update(self, standstill, raw_speed, active, dt, measured_accel=0., horizon=.4):
+    if not active:
+      self.__init__()
+      return False
+    valid = math.isfinite(raw_speed) and math.isfinite(dt) and dt > 0
+    stationary = valid and standstill and abs(raw_speed) < .03
+    self.elapsed = self.elapsed + dt if stationary else 0.
+    confirmed = self.elapsed >= .2-1e-9
+    if valid:
+      predicted = abs(raw_speed) + min(0., measured_accel if math.isfinite(measured_accel) else 0.) * horizon
+      self.preload |= abs(raw_speed) <= .5 and predicted <= .1
+    self.holding |= confirmed
+    return confirmed
 
 
 class RegenResponse:
@@ -111,6 +123,7 @@ def profile_valid(profile=PROFILE):
         *profile.creep,
         profile.brake_gain,
         *profile.brake_gain_speed,
+        *profile.brake_regen,
         profile.brake_deadband,
         profile.brake_power,
         profile.response_horizon,
@@ -131,6 +144,8 @@ def profile_valid(profile=PROFILE):
     and 0.003 <= profile.brake_gain <= 0.015
     and (not profile.brake_gain_speed or len(profile.brake_gain_speed) == len(profile.speed)
          and all(0.001 <= value <= 0.05 for value in profile.brake_gain_speed))
+    and (not profile.brake_regen or len(profile.brake_regen) == len(profile.speed)
+         and profile.brake_regen[0] == 0 and all(0 <= b and r + b <= 1.5 + 1e-9 for r, b in zip(profile.regen, profile.brake_regen, strict=True)))
     and 0 <= profile.brake_deadband <= 60
     and 1 <= profile.brake_power <= 3
     and 0 <= profile.response_horizon <= .6
@@ -176,7 +191,7 @@ def configure(CP, mode, *, profile=PROFILE, test_ready=False, kind='personal'):
 
 
 def allocate(accel, speed, params, *, stopping=False, standstill=False, engine_running=None, pitch=0.0, profile=PROFILE, regen_scale=1.0,
-             measured_accel=0.0):
+             measured_accel=0.0, preload=False, holding=False):
   """Return gas/regen and friction commands within existing panda limits.
 
   Friction supplies the shortfall as regeneration vanishes. Engine state is
@@ -202,9 +217,29 @@ def allocate(accel, speed, params, *, stopping=False, standstill=False, engine_r
   gain = float(np.interp(predicted_speed, profile.speed, profile.brake_gain_speed)) if profile.brake_gain_speed else profile.brake_gain
   exponent = 1 + (profile.brake_power - 1) * min(1., predicted_speed / 3.)
   brake = int(round(400 * (friction / (400 * gain)) ** (1 / exponent) + (profile.brake_deadband if friction > 0 else 0.)))
+  extra_regen = float(np.interp(predicted_speed, profile.speed, profile.brake_regen)) if profile.brake_regen else 0.
+  extra_regen *= float(np.clip(regen_scale, 0., 1.)) * (1. if engine_running is False else .5)
+  extra_regen *= 1. if stopping else max(0., -gas) / abs(params.MAX_ACC_REGEN)
+  if extra_regen > 0 and friction > 0:
+    # Invert the identified joint response with a fixed bounded search. The
+    # combined credit stays within the existing 1.5 m/s² regenerative envelope.
+    lo, hi = 0., 1.
+    for _ in range(18):
+      mid = (lo + hi) / 2
+      force = 400 * gain * max(0., mid - profile.brake_deadband / 400.) ** exponent + extra_regen * mid
+      if force < friction:
+        lo = mid
+      else:
+        hi = mid
+    brake = round(400 * hi)
+  if stopping and preload:
+    # Static friction must oppose either creep or gravity. Do not credit the
+    # brake-command-associated regen when preparing stationary holding force.
+    floor = abs(profile.creep[0] - gravity) + .05
+    brake = max(brake, math.ceil(400 * (floor / (400 * gain)) ** (1 / exponent) + profile.brake_deadband))
   if stopping:
     gas = params.INACTIVE_REGEN
-  if standstill and stopping:
+  if (standstill or holding) and stopping:
     # Preserve the stock holding command; do not double holding pressure when
     # switching to a zero-regen map at rest.
     brake = max(brake, int(round(np.interp(-2.0, params.BRAKE_LOOKUP_BP, params.BRAKE_LOOKUP_V))))

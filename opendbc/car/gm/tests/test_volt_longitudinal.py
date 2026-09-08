@@ -107,3 +107,46 @@ def test_hold_needs_stationary_wheels_and_restarts_on_motion_or_override():
   assert not hold.update(True, 0., False, .04)
   assert not hold.update(False, 0., True, .04)
   assert not hold.update(True, float('nan'), True, .04)
+
+
+def test_holding_pressure_survives_motion_without_claiming_full_stop():
+  from opendbc.car.gm.volt_longitudinal import VoltHold
+  hold = VoltHold()
+  assert not hold.update(False, .2, True, .04, measured_accel=-.4, horizon=.6)
+  assert hold.preload and not hold.holding
+  for _ in range(5):
+    confirmed = hold.update(True, 0., True, .04)
+  assert confirmed and hold.holding
+  assert not hold.update(False, -.05, True, .04)
+  assert hold.holding and hold.preload
+  assert not hold.update(True, 0., False, .04)
+  assert not hold.holding and not hold.preload
+
+
+def test_uphill_preload_prepares_opposing_force_before_stationary_confirmation():
+  params = CarControllerParams(CarInterface.get_non_essential_params(CAR.CHEVROLET_VOLT))
+  profile = replace(PROFILE, creep=(.25,) * len(PROFILE.speed), brake_gain=.01)
+  normal = allocate(0., .1, params, stopping=True, pitch=.05, profile=profile)
+  preloaded = allocate(0., .1, params, stopping=True, pitch=.05, profile=profile, preload=True)
+  assert normal[1] == 0 and preloaded[1] * profile.brake_gain >= abs(.25 - 9.81 * math.sin(.05))
+  assert preloaded[0] == params.INACTIVE_REGEN
+  held = allocate(0., 0., params, stopping=True, standstill=False, holding=True, preload=True, profile=profile)
+  assert held[1] >= 133
+  assert allocate(-4., .1, params, stopping=True, pitch=.05, profile=profile, preload=True)[1] >= preloaded[1]
+
+
+def test_joint_regen_inverse_stays_bounded_and_cannot_supply_stationary_hold():
+  params = CarControllerParams(CarInterface.get_non_essential_params(CAR.CHEVROLET_VOLT))
+  curve = tuple(min(.5, v / 10) for v in PROFILE.speed)
+  profile = replace(PROFILE, regen=curve, brake_regen=curve)
+  assert profile_valid(profile)
+  assert not profile_valid(replace(profile, brake_regen=(2.,) * len(curve)))
+  for speed in (.1, 1., 5., 10.):
+    previous = 400
+    for k in range(401):
+      gas, brake = allocate(-4 + k * .01, speed, params, stopping=True, profile=profile, engine_running=False)
+      assert gas == params.INACTIVE_REGEN and 0 <= brake <= previous
+      previous = brake
+  without = replace(profile, brake_regen=())
+  assert allocate(-1., 5., params, profile=profile, engine_running=False)[1] < allocate(-1., 5., params, profile=without, engine_running=False)[1]
+  assert allocate(0., 0., params, profile=profile, stopping=True, preload=True) == allocate(0., 0., params, profile=without, stopping=True, preload=True)

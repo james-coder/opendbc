@@ -89,7 +89,9 @@ class CarController(CarControllerBase):
       if self.frame % 4 == 0:
         stopping = actuators.longControlState == LongCtrlState.stopping
         personal = bool(self.CP.flags & volt_longitudinal.VoltFlags.PERSONAL) and volt_longitudinal.enabled(self.CP)
-        confirmed_stop = self.volt_hold.update(CS.out.standstill, CS.out.vEgoRaw, CC.longActive and stopping, 4 * DT_CTRL) if personal else False
+        confirmed_stop = self.volt_hold.update(
+          CS.out.standstill, CS.out.vEgoRaw, personal and CC.longActive and stopping, 4 * DT_CTRL,
+          measured_accel=CS.out.aEgo, horizon=self.volt_profile.response_horizon)
         hold_stop = confirmed_stop if personal else CS.out.standstill
         if not CC.longActive:
           # ASCM sends max regen when not enabled
@@ -110,6 +112,8 @@ class CarController(CarControllerBase):
             engine_running=getattr(CS, 'volt_engine_running', None),
             profile=self.volt_profile,
             measured_accel=CS.out.aEgo,
+            preload=personal and self.volt_hold.preload,
+            holding=personal and self.volt_hold.holding,
             regen_scale=regen_scale,
             pitch=CC.orientationNED[1] if len(CC.orientationNED) == 3 else 0.)
         elif volt_longitudinal.enabled(self.CP):
