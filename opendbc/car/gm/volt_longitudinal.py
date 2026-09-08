@@ -17,6 +17,7 @@ class VoltFlags(IntFlag):
   SMOOTH = 1 << 16
   PERSONAL = 1 << 17
   TEST = 1 << 18
+  BUNDLE = 1 << 19
 
 
 @dataclass(frozen=True)
@@ -142,16 +143,21 @@ def personal_enabled(CP):
   return enabled(CP) and bool(CP.flags & VoltFlags.PERSONAL) and PROFILE.personal_validated
 
 
-def configure(CP, mode, *, profile=PROFILE, test_ready=False):
+def configure(CP, mode, *, profile=PROFILE, test_ready=False, kind='personal'):
   """Called once before CarParams is published; CC retains this same CP object."""
   if not supported(CP):
     return "stock"
-  CP.flags &= ~int(VoltFlags.SMOOTH | VoltFlags.PERSONAL | VoltFlags.TEST)
+  CP.flags &= ~int(VoltFlags.SMOOTH | VoltFlags.PERSONAL | VoltFlags.TEST | VoltFlags.BUNDLE)
+  if (kind not in ('brake', 'personal') or mode == 'personal' and kind != 'personal'
+      or mode == 'smooth' and kind != 'brake'):
+    return 'stock'
   if mode == 'test' and test_ready and profile_valid(profile):
-    CP.flags |= int(VoltFlags.SMOOTH | VoltFlags.PERSONAL | VoltFlags.TEST)
+    CP.flags |= int(VoltFlags.SMOOTH | VoltFlags.TEST | VoltFlags.BUNDLE)
+    if kind == 'personal':
+      CP.flags |= int(VoltFlags.PERSONAL)
     return 'test'
   if mode in ("smooth", "personal") and profile.validated and profile_valid(profile):
-    CP.flags |= int(VoltFlags.SMOOTH)
+    CP.flags |= int(VoltFlags.SMOOTH | VoltFlags.BUNDLE)
     if mode == "personal" and profile.personal_validated:
       CP.flags |= int(VoltFlags.PERSONAL)
       return "personal"
