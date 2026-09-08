@@ -3,7 +3,7 @@ import math
 
 from opendbc.car.gm.interface import CarInterface
 from opendbc.car.gm.values import CAR, CarControllerParams
-from opendbc.car.gm.volt_longitudinal import PROFILE, VoltFlags, allocate, configure, enabled, profile_valid
+from opendbc.car.gm.volt_longitudinal import PROFILE, VoltFlags, RegenResponse, allocate, configure, enabled, profile_valid
 
 
 def test_unvalidated_profile_is_locked_at_startup():
@@ -43,3 +43,32 @@ def test_flags_are_scoped_to_the_bypassed_volt_installation():
   assert enabled(cp)
   cp.carFingerprint = CAR.CHEVROLET_BOLT_EUV
   assert not enabled(cp)
+
+
+def test_regen_fallback_waits_for_persistent_response_and_resets():
+  response = RegenResponse()
+  for _ in range(19):
+    assert response.update(-1., 0., 5., True, .04) == 1.
+  for _ in range(80):
+    response.update(-1., 0., 5., True, .04)
+  assert response.scale == 0.
+  for _ in range(50):
+    response.update(-1., -2., 5., True, .04)
+  assert response.scale == 1.
+  response.update(0., 0., 0., False, .04)
+  assert response.scale == 1. and response.previous is None
+
+
+def test_speed_dependent_friction_calibration_is_bounded():
+  params = CarControllerParams(CarInterface.get_non_essential_params(CAR.CHEVROLET_VOLT))
+  profile = replace(PROFILE, brake_gain_speed=tuple(.01 for _ in PROFILE.speed), brake_deadband=40.)
+  assert profile_valid(profile)
+  assert not profile_valid(replace(profile, brake_gain_speed=(float('nan'),) * len(PROFILE.speed)))
+  assert not profile_valid(replace(profile, brake_deadband=61.))
+  for speed in (0., .5, 5., 20.):
+    for scale in (0., .5, 1.):
+      previous = 400
+      for i in range(601):
+        gas, brake = allocate(-4. + i * .01, speed, params, profile=profile, regen_scale=scale)
+        assert -650 <= gas <= 1018 and 0 <= brake <= previous
+        previous = brake

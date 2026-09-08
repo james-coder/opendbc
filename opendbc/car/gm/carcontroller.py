@@ -32,6 +32,8 @@ class CarController(CarControllerBase):
     self.lka_icon_status_last = (False, False)
 
     self.params = CarControllerParams(self.CP)
+    self.volt_profile = volt_longitudinal.PROFILE
+    self.volt_regen_response = volt_longitudinal.RegenResponse()
 
     self.packer_pt = CANPacker(DBC[self.CP.carFingerprint][Bus.pt])
     self.packer_obj = CANPacker(DBC[self.CP.carFingerprint][Bus.radar])
@@ -98,10 +100,15 @@ class CarController(CarControllerBase):
             self.apply_gas = self.params.INACTIVE_REGEN
 
         if CC.longActive and volt_longitudinal.enabled(self.CP):
+          regen_scale = self.volt_regen_response.update(actuators.accel, CS.out.aEgo, CS.out.vEgo, True, 4 * DT_CTRL)
           self.apply_gas, self.apply_brake = volt_longitudinal.allocate(
             actuators.accel, CS.out.vEgo, self.params, stopping=stopping, standstill=CS.out.standstill,
             engine_running=getattr(CS, 'volt_engine_running', None),
+            profile=self.volt_profile,
+            regen_scale=regen_scale,
             pitch=CC.orientationNED[1] if len(CC.orientationNED) == 3 else 0.)
+        elif volt_longitudinal.enabled(self.CP):
+          self.volt_regen_response.update(0., 0., 0., False, 4 * DT_CTRL)
 
         idx = (self.frame // 4) % 4
 

@@ -29,6 +29,8 @@ class VoltProfile:
   regen: tuple = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.035758, 0.035758, 0.703860)
   creep: tuple = (0.400838, 0.275838, 0.150838, 0.025838, 0.0, 0.0, 0.0, 0.0, 0.0)
   brake_gain: float = 0.008518798
+  brake_gain_speed: tuple = ()
+  brake_deadband: float = 0.0
   integral_limit: float = 0.45
   braking_ki: float = 0.35
   stop_speed: tuple = (0.0, 0.5, 1.0)
@@ -41,6 +43,35 @@ class VoltProfile:
 
 
 PROFILE = VoltProfile()
+
+
+class RegenResponse:
+  """Bounded loss-of-regen fallback after persistent, settled response shortfall.
+
+  This does not estimate battery state. It reduces credited regen only after
+  measured deceleration fails to follow a stable braking command for 0.8 s.
+  """
+  def __init__(self):
+    self.scale = 1.0
+    self.deficit_time = 0.0
+    self.previous = None
+
+  def update(self, requested, measured, speed, active, dt):
+    if not active:
+      self.__init__()
+      return self.scale
+    stable = self.previous is not None and abs(requested - self.previous) <= 1.25 * dt
+    self.previous = requested
+    error = measured - requested
+    if speed >= 1.5 and requested < -0.2 and stable and error > 0.35:
+      self.deficit_time += dt
+      if self.deficit_time >= 0.8:
+        self.scale = max(0.0, self.scale - 0.75 * dt)
+    else:
+      self.deficit_time = 0.0
+    if requested < -0.2 and error < -0.35:
+      self.scale = min(1.0, self.scale + 0.5 * dt)
+    return self.scale
 
 
 def supported(CP):
@@ -58,6 +89,8 @@ def profile_valid(profile=PROFILE):
         *profile.regen,
         *profile.creep,
         profile.brake_gain,
+        *profile.brake_gain_speed,
+        profile.brake_deadband,
         profile.integral_limit,
         profile.braking_ki,
         profile.stop_distance,
@@ -73,6 +106,9 @@ def profile_valid(profile=PROFILE):
     and all(a < b for a, b in zip(profile.speed, profile.speed[1:], strict=False))
     and all(0 <= a <= b <= 1.5 for a, b in zip(profile.regen, profile.regen[1:], strict=False))
     and 0.003 <= profile.brake_gain <= 0.015
+    and (not profile.brake_gain_speed or len(profile.brake_gain_speed) == len(profile.speed)
+         and all(0.001 <= value <= 0.05 for value in profile.brake_gain_speed))
+    and 0 <= profile.brake_deadband <= 60
     and 0 <= profile.integral_limit <= 0.6
     and 0 <= profile.braking_ki <= 1
     and 4.5 <= profile.stop_distance <= 8
@@ -106,7 +142,7 @@ def configure(CP, mode):
   return "stock"
 
 
-def allocate(accel, speed, params, *, stopping=False, standstill=False, engine_running=None, pitch=0.0, profile=PROFILE):
+def allocate(accel, speed, params, *, stopping=False, standstill=False, engine_running=None, pitch=0.0, profile=PROFILE, regen_scale=1.0):
   """Return gas/regen and friction commands within existing panda limits.
 
   Friction supplies the shortfall as regeneration vanishes. Engine state is
@@ -116,6 +152,7 @@ def allocate(accel, speed, params, *, stopping=False, standstill=False, engine_r
   accel = float(np.clip(accel, params.ACCEL_MIN, params.ACCEL_MAX))
   speed = max(0.0, speed)
   regen = float(np.interp(speed, profile.speed, profile.regen))
+  regen *= float(np.clip(regen_scale, 0., 1.))
   if engine_running is not False:
     regen *= 0.5
   creep = float(np.interp(speed, profile.speed, profile.creep))
@@ -124,7 +161,9 @@ def allocate(accel, speed, params, *, stopping=False, standstill=False, engine_r
   gravity = 9.81 * math.sin(float(np.clip(pitch, -0.1, 0.1))) if math.isfinite(pitch) else 0.0
   demand = accel - creep * float(np.interp(accel, [0.0, 0.2], [1.0, 0.0])) + gravity
   gas = float(np.interp(demand, [-max(regen, 0.001), 0.0, params.ACCEL_MAX], [params.MAX_ACC_REGEN, 0.0, params.MAX_GAS]))
-  brake = int(round(max(0.0, -demand - regen) / profile.brake_gain))
+  friction = max(0.0, -demand - regen)
+  gain = float(np.interp(speed, profile.speed, profile.brake_gain_speed)) if profile.brake_gain_speed else profile.brake_gain
+  brake = int(round(friction / gain + (profile.brake_deadband if friction > 0 else 0.)))
   if stopping:
     gas = params.INACTIVE_REGEN
   if standstill and stopping:
