@@ -357,6 +357,29 @@ struct CarControl {
   orientationNED @13 :List(Float32);
   angularVelocity @14 :List(Float32);
   currentCurvature @17 :Float32;  # From vehicle model
+  longitudinalProtection @18 :LongitudinalProtection;
+
+  struct LongitudinalProtection {
+    active @0 :Bool;
+    state @1 :State;
+    accelCeiling @2 :Float32;
+    brakeFloor @3 :UInt16;
+    monoTime @4 :UInt64;
+    profileId @5 :Text;
+    trackId @6 :Int32 = -1;
+    minimumGap @7 :Float32;
+    assessed @8 :Bool;
+    reason @9 :Text;
+    observationMonoTime @10 :UInt64;
+    enum State {
+      unavailable @0;
+      monitoring @1;
+      protective @2;
+      emergency @3;
+      degraded @4;
+      holding @5;
+    }
+  }
 
   cruiseControl @4 :CruiseControl;
   hudControl @5 :HUDControl;
@@ -447,6 +470,10 @@ struct CarControl {
 }
 
 struct CarOutput {
+  protectionAccepted @1 :Bool;
+  protectionReason @2 :Text;
+  protectionCheckedMonoTime @3 :UInt64;
+  protectionCommandMonoTime @4 :UInt64;
   # Any car specific rate limits or quirks applied by
   # the CarController are reflected in actuatorsOutput
   # and matches what is sent to the car

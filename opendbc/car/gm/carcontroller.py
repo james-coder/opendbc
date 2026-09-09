@@ -3,6 +3,7 @@ from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.gm import gmcan, volt_longitudinal
+from opendbc.car.gm.volt_protection import ProtectionGate
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm.values import DBC, CanBus, CarControllerParams, CruiseButtons
 from opendbc.car.interfaces import CarControllerBase
@@ -35,6 +36,7 @@ class CarController(CarControllerBase):
     self.volt_profile = volt_longitudinal.PROFILE
     self.volt_regen_response = volt_longitudinal.RegenResponse()
     self.volt_hold = volt_longitudinal.VoltHold()
+    self.protection_gate = ProtectionGate()
 
     self.packer_pt = CANPacker(DBC[self.CP.carFingerprint][Bus.pt])
     self.packer_obj = CANPacker(DBC[self.CP.carFingerprint][Bus.radar])
@@ -118,6 +120,15 @@ class CarController(CarControllerBase):
             pitch=CC.orientationNED[1] if len(CC.orientationNED) == 3 else 0.)
         elif volt_longitudinal.enabled(self.CP):
           self.volt_regen_response.update(0., 0., 0., False, 4 * DT_CTRL)
+
+        # The independent backend authority is installed only from a qualified
+        # startup snapshot. A message flag alone cannot enable brake actuation.
+        request = CC.longitudinalProtection
+        protected = self.protection_gate.update(request, now_nanos, CC.longActive and CC.enabled, CS.out)
+        if protected:
+          self.apply_gas = min(self.apply_gas, self.params.INACTIVE_REGEN)
+          self.apply_brake = max(self.apply_brake, request.brakeFloor)
+          hold_stop = str(request.state) == 'holding' and CS.out.standstill and abs(CS.out.vEgoRaw) < .03
 
         idx = (self.frame // 4) % 4
 
