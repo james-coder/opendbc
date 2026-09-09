@@ -29,6 +29,7 @@ class CarState(CarStateBase):
     self.cam_lka_steering_cmd_counter = 0
     self.buttons_counter = 0
 
+    self.volt_engine_running = None
     self.distance_button = 0
 
   def update_button_enable(self, buttonEvents: list[structs.CarState.ButtonEvent]):
@@ -46,6 +47,10 @@ class CarState(CarStateBase):
     loopback_cp = can_parsers[Bus.loopback]
 
     ret = structs.CarState()
+    # Parser message timestamps prevent interpreting the initial zero as engine-off.
+    rpm_ts = pt_cp.ts_nanos.get('ECMEngineStatus', {}).get('EngineRPM', 0)
+    latest_ts = max(pt_cp.ts_nanos.get('EBCMWheelSpdRear', {}).values(), default=0)
+    self.volt_engine_running = (pt_cp.vl['ECMEngineStatus']['EngineRPM'] > 0) if rpm_ts and abs(latest_ts - rpm_ts) < 300_000_000 else None
 
     prev_cruise_buttons = self.cruise_buttons
     prev_distance_button = self.distance_button
