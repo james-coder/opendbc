@@ -65,6 +65,7 @@ class GMSafetyFlags(IntFlag):
   EV = 4
   READ_ONLY_OBD = 8
   READ_ONLY_GM_DIAGNOSTICS = 16
+  READ_ONLY_GM_EGR = 32
 
 
 class Footnote(Enum):

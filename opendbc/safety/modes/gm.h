@@ -30,6 +30,7 @@ static GmHardware gm_hw = GM_ASCM;
 static bool gm_pcm_cruise = false;
 static bool gm_read_only_obd = false;
 static bool gm_read_only_diagnostics = false;
+static bool gm_read_only_egr = false;
 static bool gm_obd_speed_seen = false;
 static uint32_t gm_obd_speed_ts = 0U;
 static bool gm_obd_tx_seen[10] = {0};
@@ -56,8 +57,15 @@ static bool gm_obd_tx_hook(const CANPacket_t *msg) {
                            (pid == 11U) || (pid == 13U) || (pid == 15U) || (pid == 16U);
     const bool live = (msg->data[0] == 2U) && (msg->data[1] == 1U) && live_pid;
     const bool freeze = (msg->data[0] == 3U) && (msg->data[1] == 2U) && freeze_pid;
+    const bool egr_pid = live_pid || (pid == 0U) || (pid == 1U) || (pid == 11U) || (pid == 15U) || (pid == 16U) ||
+                         (pid == 32U) || (pid == 51U) || (pid == 64U) || (pid == 65U) || (pid == 96U) ||
+                         (pid == 105U) || (pid == 107U);
+    const bool egr_live = (msg->data[1] == 1U) && egr_pid;
+    const bool egr_monitor = (msg->data[1] == 6U) && ((pid == 0U) || (pid == 32U) || (pid == 49U));
+    const bool egr_identification = (msg->data[1] == 9U) && ((pid == 0U) || (pid == 4U) || (pid == 6U));
+    const bool egr = gm_read_only_egr && (msg->data[0] == 2U) && (egr_live || egr_monitor || egr_identification);
     // Shares the standard functional-query timer. Freeze-frame number is fixed at zero.
-    allowed = allowed && gm_read_only_diagnostics && (live || freeze);
+    allowed = allowed && gm_read_only_diagnostics && (live || freeze || egr);
   } else if (msg->addr == 0x7DFU) {
     const bool lamp = (msg->data[0] == 2U) && (msg->data[1] == 1U) && (msg->data[2] == 1U);
     const bool codes = (msg->data[0] == 1U) && (msg->data[2] == 0U) &&
@@ -218,8 +226,10 @@ static safety_config gm_init(uint16_t param) {
   const uint16_t GM_PARAM_EV = 4;
   const uint16_t GM_PARAM_READ_ONLY_OBD = 8;
   const uint16_t GM_PARAM_READ_ONLY_DIAGNOSTICS = 16;
+  const uint16_t GM_PARAM_READ_ONLY_EGR = 32;
   gm_read_only_obd = GET_FLAG(param, GM_PARAM_READ_ONLY_OBD) && !GET_FLAG(param, GM_PARAM_HW_CAM) && GET_FLAG(param, GM_PARAM_EV);
   gm_read_only_diagnostics = gm_read_only_obd && GET_FLAG(param, GM_PARAM_READ_ONLY_DIAGNOSTICS);
+  gm_read_only_egr = gm_read_only_diagnostics && GET_FLAG(param, GM_PARAM_READ_ONLY_EGR);
   gm_obd_speed_seen = false;
   gm_obd_speed_ts = 0U;
   for (unsigned int i = 0U; i < 10U; i++) {

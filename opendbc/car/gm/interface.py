@@ -89,7 +89,8 @@ class CarInterface(CarInterfaceBase):
     ret.brand = "gm"
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.gm)]
     if candidate == CAR.CHEVROLET_VOLT:
-      ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.READ_ONLY_OBD.value | GMSafetyFlags.READ_ONLY_GM_DIAGNOSTICS.value
+      ret.safetyConfigs[0].safetyParam |= (GMSafetyFlags.READ_ONLY_OBD.value | GMSafetyFlags.READ_ONLY_GM_DIAGNOSTICS.value |
+                                         GMSafetyFlags.READ_ONLY_GM_EGR.value)
     ret.autoResumeSng = False
     ret.enableBsm = 0x142 in fingerprint[CanBus.POWERTRAIN]
 
