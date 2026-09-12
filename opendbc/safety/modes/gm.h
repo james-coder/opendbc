@@ -28,6 +28,40 @@ typedef enum {
 } GmHardware;
 static GmHardware gm_hw = GM_ASCM;
 static bool gm_pcm_cruise = false;
+static bool gm_read_only_obd = false;
+static bool gm_obd_speed_seen = false;
+static uint32_t gm_obd_speed_ts = 0U;
+static bool gm_obd_tx_seen[9] = {0};
+static uint32_t gm_obd_tx_ts[9] = {0};
+
+static bool gm_obd_tx_hook(const CANPacket_t *msg) {
+  const uint32_t now = microsecond_timer_get();
+  bool allowed = gm_read_only_obd && !controls_allowed && !vehicle_moving && gm_obd_speed_seen &&
+                 (safety_get_ts_elapsed(now, gm_obd_speed_ts) < 500000U);
+  unsigned int index = 0U;
+  uint32_t interval = 500000U;
+  if (msg->addr == 0x7DFU) {
+    const bool lamp = (msg->data[0] == 2U) && (msg->data[1] == 1U) && (msg->data[2] == 1U);
+    const bool codes = (msg->data[0] == 1U) && (msg->data[2] == 0U) &&
+                       ((msg->data[1] == 3U) || (msg->data[1] == 7U) || (msg->data[1] == 10U));
+    allowed = allowed && (lamp || codes);
+  } else {
+    index = (msg->addr - 0x7E0U) + 1U;
+    interval = 100000U;
+    allowed = allowed && (msg->data[0] == 0x30U) && (msg->data[1] == 0U) && (msg->data[2] == 10U);
+  }
+  for (unsigned int i = 3U; i < 8U; i++) {
+    allowed = allowed && (msg->data[i] == 0U);
+  }
+  if (gm_obd_tx_seen[index] && (safety_get_ts_elapsed(now, gm_obd_tx_ts[index]) < interval)) {
+    allowed = false;
+  }
+  if (allowed) {
+    gm_obd_tx_seen[index] = true;
+    gm_obd_tx_ts[index] = now;
+  }
+  return allowed;
+}
 
 static void gm_rx_hook(const CANPacket_t *msg) {
   const int GM_STANDSTILL_THRSLD = 10;  // 0.311kph
@@ -45,6 +79,8 @@ static void gm_rx_hook(const CANPacket_t *msg) {
       int left_rear_speed = (msg->data[0] << 8) | msg->data[1];
       int right_rear_speed = (msg->data[2] << 8) | msg->data[3];
       vehicle_moving = (left_rear_speed > GM_STANDSTILL_THRSLD) || (right_rear_speed > GM_STANDSTILL_THRSLD);
+      gm_obd_speed_seen = true;
+      gm_obd_speed_ts = microsecond_timer_get();
     }
 
     // ACC steering wheel buttons (GM_CAM is tied to the PCM)
@@ -105,6 +141,10 @@ static bool gm_tx_hook(const CANPacket_t *msg) {
 
   bool tx = true;
 
+  if ((msg->addr >= 0x7DFU) && (msg->addr <= 0x7E7U)) {
+    tx = gm_obd_tx_hook(msg);
+  }
+
   // BRAKE: safety check
   if (msg->addr == 0x315U) {
     int brake = ((msg->data[0] & 0xFU) << 8) + msg->data[1];
@@ -158,6 +198,14 @@ static bool gm_tx_hook(const CANPacket_t *msg) {
 static safety_config gm_init(uint16_t param) {
   const uint16_t GM_PARAM_HW_CAM = 1;
   const uint16_t GM_PARAM_EV = 4;
+  const uint16_t GM_PARAM_READ_ONLY_OBD = 8;
+  gm_read_only_obd = GET_FLAG(param, GM_PARAM_READ_ONLY_OBD) && !GET_FLAG(param, GM_PARAM_HW_CAM) && GET_FLAG(param, GM_PARAM_EV);
+  gm_obd_speed_seen = false;
+  gm_obd_speed_ts = 0U;
+  for (unsigned int i = 0U; i < 9U; i++) {
+    gm_obd_tx_seen[i] = false;
+    gm_obd_tx_ts[i] = 0U;
+  }
 
   // common safety checks assume unscaled integer values
   static const int GM_GAS_TO_CAN = 8;  // 1 / 0.125
@@ -171,7 +219,12 @@ static safety_config gm_init(uint16_t param) {
 
   static const CanMsg GM_ASCM_TX_MSGS[] = {{0x180, 0, 4, .check_relay = true}, {0x409, 0, 7, .check_relay = false}, {0x40A, 0, 7, .check_relay = false}, {0x2CB, 0, 8, .check_relay = true}, {0x370, 0, 6, .check_relay = false},  // pt bus
                                            {0xA1, 1, 7, .check_relay = false}, {0x306, 1, 8, .check_relay = false}, {0x308, 1, 7, .check_relay = false}, {0x310, 1, 2, .check_relay = false},   // obs bus
-                                           {0x315, 2, 5, .check_relay = false}};  // ch bus
+                                           {0x315, 2, 5, .check_relay = false},  // ch bus
+                                           {0x7DF, 0, 8, .check_relay = false},  // emissions requests, payload-gated above
+                                           {0x7E0, 0, 8, .check_relay = false}, {0x7E1, 0, 8, .check_relay = false},
+                                           {0x7E2, 0, 8, .check_relay = false}, {0x7E3, 0, 8, .check_relay = false},
+                                           {0x7E4, 0, 8, .check_relay = false}, {0x7E5, 0, 8, .check_relay = false},
+                                           {0x7E6, 0, 8, .check_relay = false}, {0x7E7, 0, 8, .check_relay = false}};
 
 
   static const LongitudinalLimits GM_CAM_LONG_LIMITS = {

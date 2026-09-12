@@ -63,6 +63,7 @@ class GMSafetyFlags(IntFlag):
   HW_CAM = 1
   HW_CAM_LONG = 2
   EV = 4
+  READ_ONLY_OBD = 8
 
 
 class Footnote(Enum):

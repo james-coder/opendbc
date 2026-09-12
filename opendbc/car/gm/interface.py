@@ -88,6 +88,8 @@ class CarInterface(CarInterfaceBase):
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
     ret.brand = "gm"
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.gm)]
+    if candidate == CAR.CHEVROLET_VOLT:
+      ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.READ_ONLY_OBD.value
     ret.autoResumeSng = False
     ret.enableBsm = 0x142 in fingerprint[CanBus.POWERTRAIN]
 
