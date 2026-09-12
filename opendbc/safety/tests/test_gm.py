@@ -167,6 +167,112 @@ class TestGmAscmEVSafety(TestGmAscmSafety, TestGmEVSafetyBase):
   pass
 
 
+class TestGmReadOnlyObdSafety(TestGmAscmEVSafety):
+  EXTRA_SAFETY_PARAM = GMSafetyFlags.EV | GMSafetyFlags.READ_ONLY_OBD
+  TX_MSGS = TestGmAscmEVSafety.TX_MSGS + [[addr, 0] for addr in range(0x7DF, 0x7E8)]
+  REQUESTS = [bytes.fromhex(s) for s in ('02 01 01 00 00 00 00 00', '01 03 00 00 00 00 00 00',
+                                       '01 07 00 00 00 00 00 00', '01 0A 00 00 00 00 00 00')]
+  FLOW_CONTROL = bytes.fromhex('30 00 0A 00 00 00 00 00')
+
+  def _obd(self, addr=0x7DF, data=None, bus=0):
+    return libsafety_py.make_CANPacket(addr, bus, self.REQUESTS[0] if data is None else data)
+
+  def _stationary(self, now=0):
+    self.safety.set_timer(now)
+    self._rx(self._speed_msg(0))
+    self.safety.set_controls_allowed(False)
+
+  def test_obd_all_allowed_frames(self):
+    for data in self.REQUESTS:
+      self.setUp()
+      self._stationary()
+      self.assertTrue(self._tx(self._obd(data=data)))
+    for addr in range(0x7E0, 0x7E8):
+      self.assertTrue(self._tx(self._obd(addr, self.FLOW_CONTROL)))
+
+  def test_obd_rejects_every_other_payload(self):
+    # Reset state for each attempt so rate limiting cannot hide a payload-check bug.
+    for addr, canonical in [(0x7DF, data) for data in self.REQUESTS] + [(0x7E0, self.FLOW_CONTROL)]:
+      for index in range(8):
+        for value in range(256):
+          payload = bytearray(canonical)
+          payload[index] = value
+          self.safety.set_safety_hooks(CarParams.SafetyModel.gm, self.EXTRA_SAFETY_PARAM)
+          self._stationary()
+          expected = bytes(payload) in (self.REQUESTS if addr == 0x7DF else [self.FLOW_CONTROL])
+          self.assertEqual(expected, self._tx(self._obd(addr, bytes(payload))), (addr, bytes(payload)))
+
+  def test_obd_requires_fresh_valid_speed_and_disengagement(self):
+    self.assertFalse(self._tx(self._obd()))  # No wheel-speed observation after initialization.
+    self._stationary()
+    self.safety.set_timer(500000)
+    self.assertFalse(self._tx(self._obd()))
+    self._stationary(500000)
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._tx(self._obd()))
+    self.safety.set_controls_allowed(False)
+    self._rx(self._speed_msg(2))
+    self.assertFalse(self._tx(self._obd()))
+    self._stationary(500001)
+    self.assertTrue(self._tx(self._obd()))
+    self.safety.set_safety_hooks(CarParams.SafetyModel.gm, self.EXTRA_SAFETY_PARAM)
+    self.assertFalse(self._tx(self._obd()))  # A mode reset must forget the old observation.
+    self._rx(libsafety_py.make_CANPacket(0x34A, 1, bytes(5)))
+    self.assertFalse(self._tx(self._obd()))
+    self._rx(libsafety_py.make_CANPacket(0x34A, 0, bytes(4)))
+    self.assertFalse(self._tx(self._obd()))
+
+  def test_obd_requests_and_flow_control_are_rate_limited(self):
+    self._stationary()
+    self.assertTrue(self._tx(self._obd()))
+    self.assertFalse(self._tx(self._obd(data=self.REQUESTS[1])))
+    self._stationary(499999)
+    self.assertFalse(self._tx(self._obd()))
+    self._stationary(500000)
+    self.assertTrue(self._tx(self._obd()))
+    for addr in range(0x7E0, 0x7E8):
+      self.assertTrue(self._tx(self._obd(addr, self.FLOW_CONTROL)))
+      self.assertFalse(self._tx(self._obd(addr, self.FLOW_CONTROL)))
+    self._stationary(599999)
+    self.assertFalse(self._tx(self._obd(0x7E0, self.FLOW_CONTROL)))
+    self._stationary(600000)
+    self.assertTrue(self._tx(self._obd(0x7E0, self.FLOW_CONTROL)))
+
+  def test_obd_rate_limit_handles_timer_wrap(self):
+    self._stationary(0xFFFFFF00)
+    self.assertTrue(self._tx(self._obd()))
+    self._stationary(100)
+    self.assertFalse(self._tx(self._obd()))
+    self._stationary(500000)
+    self.assertTrue(self._tx(self._obd()))
+
+  def test_obd_bus_length_address_and_flag_scope(self):
+    for flags in (0, GMSafetyFlags.EV, GMSafetyFlags.READ_ONLY_OBD,
+                  self.EXTRA_SAFETY_PARAM | GMSafetyFlags.HW_CAM):
+      self.safety.set_safety_hooks(CarParams.SafetyModel.gm, flags)
+      self._stationary()
+      self.assertFalse(self._tx(self._obd()))
+      self.assertFalse(self._tx(self._obd(0x7E0, self.FLOW_CONTROL)))
+    self.setUp()
+    self._stationary()
+    for bus in (1, 2, 3):
+      self.assertFalse(self._tx(self._obd(bus=bus)))
+    for size in (0, 1, 2, 3, 4, 5, 6, 7, 12):
+      self.assertFalse(self._tx(self._obd(data=self.REQUESTS[0][:size].ljust(size, b'\x00'))))
+    for addr in (0x7DE, 0x7E8, 0x18DB33F1):
+      self.assertFalse(self._tx(self._obd(addr)))
+    for addr in range(0x7E0, 0x7E8):
+      for request in self.REQUESTS:
+        self.assertFalse(self._tx(self._obd(addr, request)))
+    self.assertFalse(self._tx(self._obd(0x7DF, self.FLOW_CONTROL)))
+
+  def test_obd_still_respects_relay_malfunction(self):
+    self._stationary()
+    self.safety.set_relay_malfunction(True)
+    self.assertFalse(self._tx(self._obd()))
+    self.assertFalse(self._tx(self._obd(0x7E0, self.FLOW_CONTROL)))
+
+
 class TestGmCameraSafetyBase(TestGmSafetyBase):
   def _user_brake_msg(self, brake):
     values = {"BrakePressed": brake}
