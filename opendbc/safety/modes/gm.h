@@ -29,10 +29,11 @@ typedef enum {
 static GmHardware gm_hw = GM_ASCM;
 static bool gm_pcm_cruise = false;
 static bool gm_read_only_obd = false;
+static bool gm_read_only_diagnostics = false;
 static bool gm_obd_speed_seen = false;
 static uint32_t gm_obd_speed_ts = 0U;
-static bool gm_obd_tx_seen[9] = {0};
-static uint32_t gm_obd_tx_ts[9] = {0};
+static bool gm_obd_tx_seen[10] = {0};
+static uint32_t gm_obd_tx_ts[10] = {0};
 
 static bool gm_obd_tx_hook(const CANPacket_t *msg) {
   const uint32_t now = microsecond_timer_get();
@@ -40,7 +41,24 @@ static bool gm_obd_tx_hook(const CANPacket_t *msg) {
                  (safety_get_ts_elapsed(now, gm_obd_speed_ts) < 500000U);
   unsigned int index = 0U;
   uint32_t interval = 500000U;
-  if (msg->addr == 0x7DFU) {
+  unsigned int padding_start = 3U;
+  if (msg->addr == 0x101U) {
+    // One-shot all-functional-systems current/history fault query. No subscriptions.
+    index = 9U;
+    interval = 5000000U;
+    padding_start = 5U;
+    allowed = allowed && gm_read_only_diagnostics && (msg->data[0] == 0xFEU) && (msg->data[1] == 3U) &&
+              (msg->data[2] == 0xA9U) && (msg->data[3] == 0x81U) && (msg->data[4] == 0x12U);
+  } else if ((msg->addr == 0x7E0U) && (msg->data[0] != 0x30U)) {
+    const unsigned int pid = msg->data[2];
+    const bool live_pid = (pid == 5U) || (pid == 12U) || (pid == 44U) || (pid == 45U);
+    const bool freeze_pid = live_pid || (pid == 2U) || (pid == 4U) || (pid == 6U) || (pid == 7U) ||
+                           (pid == 11U) || (pid == 13U) || (pid == 15U) || (pid == 16U);
+    const bool live = (msg->data[0] == 2U) && (msg->data[1] == 1U) && live_pid;
+    const bool freeze = (msg->data[0] == 3U) && (msg->data[1] == 2U) && freeze_pid;
+    // Shares the standard functional-query timer. Freeze-frame number is fixed at zero.
+    allowed = allowed && gm_read_only_diagnostics && (live || freeze);
+  } else if (msg->addr == 0x7DFU) {
     const bool lamp = (msg->data[0] == 2U) && (msg->data[1] == 1U) && (msg->data[2] == 1U);
     const bool codes = (msg->data[0] == 1U) && (msg->data[2] == 0U) &&
                        ((msg->data[1] == 3U) || (msg->data[1] == 7U) || (msg->data[1] == 10U));
@@ -50,7 +68,7 @@ static bool gm_obd_tx_hook(const CANPacket_t *msg) {
     interval = 100000U;
     allowed = allowed && (msg->data[0] == 0x30U) && (msg->data[1] == 0U) && (msg->data[2] == 10U);
   }
-  for (unsigned int i = 3U; i < 8U; i++) {
+  for (unsigned int i = padding_start; i < 8U; i++) {
     allowed = allowed && (msg->data[i] == 0U);
   }
   if (gm_obd_tx_seen[index] && (safety_get_ts_elapsed(now, gm_obd_tx_ts[index]) < interval)) {
@@ -141,7 +159,7 @@ static bool gm_tx_hook(const CANPacket_t *msg) {
 
   bool tx = true;
 
-  if ((msg->addr >= 0x7DFU) && (msg->addr <= 0x7E7U)) {
+  if ((msg->addr == 0x101U) || ((msg->addr >= 0x7DFU) && (msg->addr <= 0x7E7U))) {
     tx = gm_obd_tx_hook(msg);
   }
 
@@ -199,10 +217,12 @@ static safety_config gm_init(uint16_t param) {
   const uint16_t GM_PARAM_HW_CAM = 1;
   const uint16_t GM_PARAM_EV = 4;
   const uint16_t GM_PARAM_READ_ONLY_OBD = 8;
+  const uint16_t GM_PARAM_READ_ONLY_DIAGNOSTICS = 16;
   gm_read_only_obd = GET_FLAG(param, GM_PARAM_READ_ONLY_OBD) && !GET_FLAG(param, GM_PARAM_HW_CAM) && GET_FLAG(param, GM_PARAM_EV);
+  gm_read_only_diagnostics = gm_read_only_obd && GET_FLAG(param, GM_PARAM_READ_ONLY_DIAGNOSTICS);
   gm_obd_speed_seen = false;
   gm_obd_speed_ts = 0U;
-  for (unsigned int i = 0U; i < 9U; i++) {
+  for (unsigned int i = 0U; i < 10U; i++) {
     gm_obd_tx_seen[i] = false;
     gm_obd_tx_ts[i] = 0U;
   }
@@ -221,6 +241,7 @@ static safety_config gm_init(uint16_t param) {
                                            {0xA1, 1, 7, .check_relay = false}, {0x306, 1, 8, .check_relay = false}, {0x308, 1, 7, .check_relay = false}, {0x310, 1, 2, .check_relay = false},   // obs bus
                                            {0x315, 2, 5, .check_relay = false},  // ch bus
                                            {0x7DF, 0, 8, .check_relay = false},  // emissions requests, payload-gated above
+                                           {0x101, 0, 8, .check_relay = false},  // fixed read-only GM fault request
                                            {0x7E0, 0, 8, .check_relay = false}, {0x7E1, 0, 8, .check_relay = false},
                                            {0x7E2, 0, 8, .check_relay = false}, {0x7E3, 0, 8, .check_relay = false},
                                            {0x7E4, 0, 8, .check_relay = false}, {0x7E5, 0, 8, .check_relay = false},

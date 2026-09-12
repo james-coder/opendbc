@@ -273,6 +273,82 @@ class TestGmReadOnlyObdSafety(TestGmAscmEVSafety):
     self.assertFalse(self._tx(self._obd(0x7E0, self.FLOW_CONTROL)))
 
 
+class TestGmReadOnlyDiagnosticsSafety(TestGmReadOnlyObdSafety):
+  EXTRA_SAFETY_PARAM = GMSafetyFlags.EV | GMSafetyFlags.READ_ONLY_OBD | GMSafetyFlags.READ_ONLY_GM_DIAGNOSTICS
+  TX_MSGS = TestGmReadOnlyObdSafety.TX_MSGS + [[0x101, 0]]
+  GM_REQUEST = bytes.fromhex('FE 03 A9 81 12 00 00 00')
+  CONTEXT = [bytes([3, 2, pid, 0, 0, 0, 0, 0]) for pid in (2, 4, 5, 6, 7, 11, 12, 13, 15, 16, 44, 45)] + \
+            [bytes([2, 1, pid, 0, 0, 0, 0, 0]) for pid in (5, 12, 44, 45)]
+
+  def test_gm_diagnostic_exact_payload_allowlist(self):
+    for addr, payload in [(0x101, self.GM_REQUEST)] + [(0x7E0, data) for data in self.CONTEXT]:
+      for index in range(8):
+        for value in range(256):
+          changed = bytearray(payload)
+          changed[index] = value
+          self.safety.set_safety_hooks(CarParams.SafetyModel.gm, self.EXTRA_SAFETY_PARAM)
+          self._stationary()
+          expected = bytes(changed) in ([self.GM_REQUEST] if addr == 0x101 else self.CONTEXT)
+          self.assertEqual(expected, self._tx(self._obd(addr, bytes(changed))), (addr, bytes(changed)))
+
+  def test_gm_diagnostics_require_new_flag_and_existing_gates(self):
+    for addr, data in [(0x101, self.GM_REQUEST), (0x7E0, self.CONTEXT[0])]:
+      for flags in (0, 4, 8, 12, 16, 20, 24, 29):
+        self.safety.set_safety_hooks(CarParams.SafetyModel.gm, flags)
+        self._stationary()
+        self.assertFalse(self._tx(self._obd(addr, data)))
+      self.setUp()
+      self.assertFalse(self._tx(self._obd(addr, data)))
+      self._stationary()
+      self.safety.set_controls_allowed(True)
+      self.assertFalse(self._tx(self._obd(addr, data)))
+      self.safety.set_controls_allowed(False)
+      self._rx(self._speed_msg(2))
+      self.assertFalse(self._tx(self._obd(addr, data)))
+      self._stationary()
+      self.safety.set_timer(500000)
+      self.assertFalse(self._tx(self._obd(addr, data)))
+      self._stationary(500000)
+      self.safety.set_relay_malfunction(True)
+      self.assertFalse(self._tx(self._obd(addr, data)))
+
+  def test_gm_diagnostics_no_other_bus_address_or_frame_size(self):
+    self._stationary()
+    for addr, data in [(0x101, self.GM_REQUEST), (0x7E0, self.CONTEXT[0])]:
+      for bus in (1, 2, 3):
+        self.assertFalse(self._tx(self._obd(addr, data, bus)))
+      for size in (0, 1, 2, 3, 4, 5, 6, 7, 12):
+        self.assertFalse(self._tx(self._obd(addr, data[:size].ljust(size, b'\x00'))))
+    for addr in (0x100, 0x102, 0x241, 0x7DF, 0x7E1, 0x7E7):
+      self.assertFalse(self._tx(self._obd(addr, self.GM_REQUEST)))
+      self.assertFalse(self._tx(self._obd(addr, self.CONTEXT[0])))
+
+  def test_gm_broadcast_cooldown_and_shared_context_timer(self):
+    self._stationary()
+    self.assertTrue(self._tx(self._obd(0x101, self.GM_REQUEST)))
+    self._stationary(4999999)
+    self.assertFalse(self._tx(self._obd(0x101, self.GM_REQUEST)))
+    self._stationary(5000000)
+    self.assertTrue(self._tx(self._obd(0x101, self.GM_REQUEST)))
+    self.assertTrue(self._tx(self._obd(0x7E0, self.CONTEXT[0])))
+    self.assertFalse(self._tx(self._obd()))
+    self._stationary(5499999)
+    self.assertFalse(self._tx(self._obd(0x7E0, self.CONTEXT[1])))
+    self._stationary(5500000)
+    self.assertTrue(self._tx(self._obd()))
+    self.assertFalse(self._tx(self._obd(0x7E0, self.CONTEXT[1])))
+
+  def test_gm_broadcast_timer_wrap_and_reset(self):
+    self._stationary(0xFFFFFF00)
+    self.assertTrue(self._tx(self._obd(0x101, self.GM_REQUEST)))
+    self._stationary(100)
+    self.assertFalse(self._tx(self._obd(0x101, self.GM_REQUEST)))
+    self._stationary(5000000)
+    self.assertTrue(self._tx(self._obd(0x101, self.GM_REQUEST)))
+    self.setUp()
+    self.assertFalse(self._tx(self._obd(0x101, self.GM_REQUEST)))
+
+
 class TestGmCameraSafetyBase(TestGmSafetyBase):
   def _user_brake_msg(self, brake):
     values = {"BrakePressed": brake}

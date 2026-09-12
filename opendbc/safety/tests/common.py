@@ -902,7 +902,7 @@ class SafetyTest(SafetyTestBase):
               continue
             if {attr, current_test}.issubset({'TestGmCameraSafety', 'TestGmCameraLongitudinalSafety', 'TestGmAscmSafety',
                                               'TestGmCameraEVSafety', 'TestGmCameraLongitudinalEVSafety', 'TestGmAscmEVSafety',
-                                              'TestGmReadOnlyObdSafety'}):
+                                              'TestGmReadOnlyObdSafety', 'TestGmReadOnlyDiagnosticsSafety'}):
               continue
             if attr.startswith('TestFord') and current_test.startswith('TestFord'):
               continue
