@@ -1,5 +1,6 @@
 import os
 import time
+from collections.abc import Callable
 
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.can_definitions import CanRecvCallable, CanSendCallable
@@ -39,14 +40,21 @@ interface_names = _get_interface_names()
 interfaces = load_interfaces(interface_names)
 
 
-def can_fingerprint(can_recv: CanRecvCallable) -> tuple[str | None, dict[int, dict]]:
+def can_fingerprint(can_recv: CanRecvCallable, *, timeout: float | None = None, min_duration: float = 0.,
+                    attempt: int = 0) -> tuple[str | None, dict[int, dict]]:
   finger = gen_empty_fingerprint()
   candidate_cars = {i: all_legacy_fingerprint_cars() for i in [0, 1]}  # attempt fingerprint on both bus 0 and 1
   frame = 0
   car_fingerprint = None
   done = False
+  started = time.monotonic()
+  eliminations = []
+  reason = "packet_limit"
 
   while not done:
+    if timeout is not None and time.monotonic() - started >= timeout:
+      reason = "timeout"
+      break
     # can_recv(wait_for_one=True) may return zero or multiple packets, so we increment frame for each one we receive
     can_packets = can_recv(wait_for_one=True)
     for can_packet in can_packets:
@@ -61,7 +69,18 @@ def can_fingerprint(can_recv: CanRecvCallable) -> tuple[str | None, dict[int, di
         for b in candidate_cars:
           # Ignore extended messages and VIN query response.
           if can.src == b and can.address < 0x800 and can.address not in (0x7df, 0x7e0, 0x7e8):
-            candidate_cars[b] = eliminate_incompatible_cars(can, candidate_cars[b])
+            previous = candidate_cars[b]
+            candidate_cars[b] = eliminate_incompatible_cars(can, previous)
+            if timeout is not None:
+              removed = [c for c in previous if c not in candidate_cars[b]]
+              if removed:
+                # Each model can be removed only once per bus: bounded startup evidence.
+                eliminations.append({"bus": b, "address": can.address, "length": len(can.dat), "data": can.dat.hex(),
+                                     "elapsed": time.monotonic() - started, "candidates": removed})
+
+      if timeout is not None:
+        frame += 1
+        continue  # Check the entire received batch before accepting a live match.
 
       # if we only have one car choice and the time since we got our first
       # message has elapsed, exit
@@ -77,12 +96,63 @@ def can_fingerprint(can_recv: CanRecvCallable) -> tuple[str | None, dict[int, di
 
       frame += 1
 
+    if timeout is not None:
+      elapsed = time.monotonic() - started
+      matches = {cc[0] for cc in candidate_cars.values() if len(cc) == 1}
+      # A deadline reached while receiving/processing is a failure, not a late acceptance.
+      if elapsed >= timeout:
+        reason, done = "timeout", True
+      elif frame >= FRAME_FINGERPRINT + 2 and elapsed >= min_duration:
+        if len(matches) == 1:
+          car_fingerprint = next(iter(matches))
+          reason, done = "matched", True
+        elif len(matches) > 1:
+          reason, done = "conflicting_buses", True
+        elif all(not cc for cc in candidate_cars.values()):
+          reason, done = "eliminated", True
+        elif min_duration == 0. and frame >= 202:
+          reason, done = "packet_limit", True
+
+  if timeout is not None:
+    carlog.warning({"event": "can_fingerprint_attempt", "attempt": attempt, "elapsed": time.monotonic() - started,
+                    "reason": reason, "candidate": car_fingerprint, "packets": frame,
+                    "remaining": candidate_cars, "eliminations": eliminations, "fingerprints": repr(finger)})
   return car_fingerprint, finger
+
+
+def can_fingerprint_with_retries(can_recv: CanRecvCallable, *, retry: bool = True,
+                                 on_attempt: Callable[[int], None] | None = None) -> tuple[str | None, dict[int, dict]]:
+  """Live only; requires a bounded receive callback (card uses a 20 ms socket timeout).
+
+  No transmissions or safety/mux changes. Offline/replay callers retain packet-based timing.
+  """
+  candidate, finger = can_fingerprint(can_recv, timeout=3., attempt=1)
+  if on_attempt is not None:
+    on_attempt(1)
+  if candidate is not None or not retry:
+    return candidate, finger
+
+  deadline = time.monotonic() + 8.
+  for attempt in (2, 3):
+    settle_until = min(time.monotonic() + 1., deadline)
+    while time.monotonic() < settle_until:
+      can_recv(wait_for_one=True)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.:
+      break
+    candidate, finger = can_fingerprint(can_recv, timeout=min(3., remaining), min_duration=2., attempt=attempt)
+    if on_attempt is not None:
+      on_attempt(attempt)
+    if candidate is not None:
+      break
+  return candidate, finger
 
 
 # **** for use live only ****
 def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback,
-                cached_params: CarParamsT | None) -> tuple[str | None, dict, str, list[CarParams.CarFw], CarParams.FingerprintSource, bool]:
+                cached_params: CarParamsT | None, *, retry_can_fingerprint: bool = False,
+                on_can_attempt: Callable[[int], None] | None = None
+                ) -> tuple[str | None, dict, str, list[CarParams.CarFw], CarParams.FingerprintSource, bool]:
   fixed_fingerprint = os.environ.get('FINGERPRINT', "")
   skip_fw_query = os.environ.get('SKIP_FW_QUERY', False)
   disable_fw_cache = os.environ.get('DISABLE_FW_CACHE', False)
@@ -126,7 +196,11 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
   # CAN fingerprint
   # drain CAN socket so we get the latest messages
   can_recv()
-  car_fingerprint, finger = can_fingerprint(can_recv)
+  if retry_can_fingerprint:
+    car_fingerprint, finger = can_fingerprint_with_retries(can_recv, retry=not fixed_fingerprint and len(fw_candidates) != 1,
+                                                        on_attempt=on_can_attempt)
+  else:
+    car_fingerprint, finger = can_fingerprint(can_recv)
 
   exact_match = True
   source = CarParams.FingerprintSource.can
@@ -149,8 +223,10 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
 
 
 def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback, alpha_long_allowed: bool,
-            is_release: bool, cached_params: CarParamsT | None = None):
-  candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(can_recv, can_send, set_obd_multiplexing, cached_params)
+            is_release: bool, cached_params: CarParamsT | None = None, *, retry_can_fingerprint: bool = False,
+            on_can_attempt: Callable[[int], None] | None = None):
+  candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(
+    can_recv, can_send, set_obd_multiplexing, cached_params, retry_can_fingerprint=retry_can_fingerprint, on_can_attempt=on_can_attempt)
 
   if candidate is None:
     carlog.error({"event": "car doesn't match any fingerprints", "fingerprints": repr(fingerprints)})
