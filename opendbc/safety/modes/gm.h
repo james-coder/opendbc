@@ -32,6 +32,10 @@ static bool gm_read_only_obd = false;
 static bool gm_read_only_diagnostics = false;
 static bool gm_obd_speed_seen = false;
 static uint32_t gm_obd_speed_ts = 0U;
+// Explicit opt-in parked gateway trial. Not part of driving actuation policy.
+static bool gm_gateway_trial = false;
+static bool gm_gateway_tx_seen = false;
+static uint32_t gm_gateway_tx_ts = 0U;
 static bool gm_obd_tx_seen[10] = {0};
 static uint32_t gm_obd_tx_ts[10] = {0};
 
@@ -159,6 +163,27 @@ static bool gm_tx_hook(const CANPacket_t *msg) {
 
   bool tx = true;
 
+  if (msg->addr == 0x6F0U) {
+    const uint32_t now = microsecond_timer_get();
+    const unsigned int kind = msg->data[0] >> 4;
+    // Only bounded ISO-TP transport, never raw OEM IDs or gateway responses.
+    const bool single = (kind == 0U) && (msg->data[0] >= 1U) && (msg->data[0] <= 7U);
+    const unsigned int length = ((msg->data[0] & 0xFU) << 8) | msg->data[1];
+    const bool first = (kind == 1U) && (length >= 8U) && (length <= 512U);
+    bool flow = (msg->data[0] == 0x30U) && (msg->data[1] == 0U) && (msg->data[2] == 10U);
+    for (unsigned int i = 3U; i < 8U; i++) {
+      flow = flow && (msg->data[i] == 0U);
+    }
+    tx = gm_gateway_trial && !msg->extended && !msg->fd && !controls_allowed && !vehicle_moving && gm_obd_speed_seen &&
+         (safety_get_ts_elapsed(now, gm_obd_speed_ts) < 500000U) &&
+         (!gm_gateway_tx_seen || (safety_get_ts_elapsed(now, gm_gateway_tx_ts) >= 10000U)) &&
+         (single || first || (kind == 2U) || flow);
+    if (tx) {
+      gm_gateway_tx_seen = true;
+      gm_gateway_tx_ts = now;
+    }
+  }
+
   if ((msg->addr == 0x101U) || ((msg->addr >= 0x7DFU) && (msg->addr <= 0x7E7U))) {
     tx = gm_obd_tx_hook(msg);
   }
@@ -218,6 +243,10 @@ static safety_config gm_init(uint16_t param) {
   const uint16_t GM_PARAM_EV = 4;
   const uint16_t GM_PARAM_READ_ONLY_OBD = 8;
   const uint16_t GM_PARAM_READ_ONLY_DIAGNOSTICS = 16;
+  const uint16_t GM_PARAM_GATEWAY_PARKED_TRIAL = 64;
+  gm_gateway_trial = GET_FLAG(param, GM_PARAM_GATEWAY_PARKED_TRIAL) && GET_FLAG(param, GM_PARAM_EV) && !GET_FLAG(param, GM_PARAM_HW_CAM);
+  gm_gateway_tx_seen = false;
+  gm_gateway_tx_ts = 0U;
   gm_read_only_obd = GET_FLAG(param, GM_PARAM_READ_ONLY_OBD) && !GET_FLAG(param, GM_PARAM_HW_CAM) && GET_FLAG(param, GM_PARAM_EV);
   gm_read_only_diagnostics = gm_read_only_obd && GET_FLAG(param, GM_PARAM_READ_ONLY_DIAGNOSTICS);
   gm_obd_speed_seen = false;
@@ -240,6 +269,7 @@ static safety_config gm_init(uint16_t param) {
   static const CanMsg GM_ASCM_TX_MSGS[] = {{0x180, 0, 4, .check_relay = true}, {0x409, 0, 7, .check_relay = false}, {0x40A, 0, 7, .check_relay = false}, {0x2CB, 0, 8, .check_relay = true}, {0x370, 0, 6, .check_relay = false},  // pt bus
                                            {0xA1, 1, 7, .check_relay = false}, {0x306, 1, 8, .check_relay = false}, {0x308, 1, 7, .check_relay = false}, {0x310, 1, 2, .check_relay = false},   // obs bus
                                            {0x315, 2, 5, .check_relay = false},  // ch bus
+                                           {0x6F0, 1, 8, .check_relay = false},  // opt-in parked gateway request only
                                            {0x7DF, 0, 8, .check_relay = false},  // emissions requests, payload-gated above
                                            {0x101, 0, 8, .check_relay = false},  // fixed read-only GM fault request
                                            {0x7E0, 0, 8, .check_relay = false}, {0x7E1, 0, 8, .check_relay = false},
