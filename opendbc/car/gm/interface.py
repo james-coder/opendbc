@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from math import fabs, exp
+import os
 import numpy as np
 
 from opendbc.car import get_safety_config, structs
@@ -89,6 +90,8 @@ class CarInterface(CarInterfaceBase):
     ret.brand = "gm"
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.gm)]
     if candidate == CAR.CHEVROLET_VOLT:
+      if os.environ.get('VOLTGW_OBJECT_PARKED_TRIAL') == '1':
+        ret.safetyConfigs[0].safetyParam |= GMSafetyFlags.GATEWAY_PARKED_TRIAL.value
       ret.safetyConfigs[0].safetyParam |= (GMSafetyFlags.READ_ONLY_OBD.value | GMSafetyFlags.READ_ONLY_GM_DIAGNOSTICS.value |
                                          GMSafetyFlags.READ_ONLY_GM_EGR.value)
     ret.autoResumeSng = False

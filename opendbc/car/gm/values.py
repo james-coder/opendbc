@@ -66,6 +66,7 @@ class GMSafetyFlags(IntFlag):
   READ_ONLY_OBD = 8
   READ_ONLY_GM_DIAGNOSTICS = 16
   READ_ONLY_GM_EGR = 32
+  GATEWAY_PARKED_TRIAL = 64
 
 
 class Footnote(Enum):
