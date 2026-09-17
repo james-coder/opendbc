@@ -222,11 +222,55 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
   return car_fingerprint, finger, vin, car_fw, source, exact_match
 
 
+def wait_for_volt_object_headers(candidate, fingerprints, can_recv: CanRecvCallable):
+  """Live startup only: model recognition may precede Object CAN wake-up.
+
+  Receive callback must be bounded (card uses a 20 ms timeout). Never transmit,
+  change safety, or infer radar presence from model identity or cached params.
+  Missing headers leave the existing GM dashcam-only decision intact.
+  """
+  from opendbc.car.gm.values import CAR, CanBus
+  from opendbc.car.gm.radar_interface import RADAR_HEADER_MSG, CAMERA_DATA_HEADER_MSG
+
+  if candidate != CAR.CHEVROLET_VOLT:
+    return
+  bus = CanBus.OBSTACLE
+  headers = (RADAR_HEADER_MSG, CAMERA_DATA_HEADER_MSG)
+  observed = fingerprints.setdefault(bus, {})
+  # Reject malformed header evidence rather than merely checking ID presence.
+  for address in headers:
+    if address in observed and observed[address] != 8:
+      del observed[address]
+  if any(address in observed for address in headers):
+    return
+
+  started = time.monotonic()
+  deadline = started + 5.
+  found = False
+  while time.monotonic() < deadline:
+    packets = can_recv(wait_for_one=True)
+    if time.monotonic() >= deadline:
+      break  # A callback crossing the deadline cannot supply late evidence.
+    for packet in packets:
+      for frame in packet:
+        if frame.src == bus and frame.address in headers and len(frame.dat) == 8:
+          observed[frame.address] = 8
+          found = True
+    if found:
+      break
+  carlog.warning({"event": "volt_object_startup_wait", "elapsed": time.monotonic() - started,
+                  "result": "header_received" if found else "timeout_dashcam",
+                  "headers": [address for address in headers if address in observed]})
+
+
 def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback, alpha_long_allowed: bool,
             is_release: bool, cached_params: CarParamsT | None = None, *, retry_can_fingerprint: bool = False,
             on_can_attempt: Callable[[int], None] | None = None):
   candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(
     can_recv, can_send, set_obd_multiplexing, cached_params, retry_can_fingerprint=retry_can_fingerprint, on_can_attempt=on_can_attempt)
+
+  if retry_can_fingerprint:
+    wait_for_volt_object_headers(candidate, fingerprints, can_recv)
 
   if candidate is None:
     carlog.error({"event": "car doesn't match any fingerprints", "fingerprints": repr(fingerprints)})

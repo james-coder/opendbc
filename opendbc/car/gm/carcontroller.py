@@ -2,7 +2,8 @@ import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.lateral import apply_driver_steer_torque_limits
-from opendbc.car.gm import gmcan
+from opendbc.car.gm import gmcan, volt_longitudinal
+from opendbc.car.gm.volt_protection import ProtectionGate
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.gm.values import DBC, CanBus, CarControllerParams, CruiseButtons
 from opendbc.car.interfaces import CarControllerBase
@@ -32,6 +33,10 @@ class CarController(CarControllerBase):
     self.lka_icon_status_last = (False, False)
 
     self.params = CarControllerParams(self.CP)
+    self.volt_profile = volt_longitudinal.PROFILE
+    self.volt_regen_response = volt_longitudinal.RegenResponse()
+    self.volt_hold = volt_longitudinal.VoltHold()
+    self.protection_gate = ProtectionGate()
 
     self.packer_pt = CANPacker(DBC[self.CP.carFingerprint][Bus.pt])
     self.packer_obj = CANPacker(DBC[self.CP.carFingerprint][Bus.radar])
@@ -85,6 +90,11 @@ class CarController(CarControllerBase):
       # Gas/regen, brakes, and UI commands - all at 25Hz
       if self.frame % 4 == 0:
         stopping = actuators.longControlState == LongCtrlState.stopping
+        personal = bool(self.CP.flags & volt_longitudinal.VoltFlags.PERSONAL) and volt_longitudinal.enabled(self.CP)
+        confirmed_stop = self.volt_hold.update(
+          CS.out.standstill, CS.out.vEgoRaw, personal and CC.longActive and stopping, 4 * DT_CTRL,
+          measured_accel=CS.out.aEgo, horizon=self.volt_profile.response_horizon)
+        hold_stop = confirmed_stop if personal else CS.out.standstill
         if not CC.longActive:
           # ASCM sends max regen when not enabled
           self.apply_gas = self.params.INACTIVE_REGEN
@@ -97,9 +107,32 @@ class CarController(CarControllerBase):
           if stopping:
             self.apply_gas = self.params.INACTIVE_REGEN
 
+        if CC.longActive and volt_longitudinal.enabled(self.CP):
+          regen_scale = self.volt_regen_response.update(actuators.accel, CS.out.aEgo, CS.out.vEgo, True, 4 * DT_CTRL)
+          self.apply_gas, self.apply_brake = volt_longitudinal.allocate(
+            actuators.accel, CS.out.vEgo, self.params, stopping=stopping, standstill=hold_stop,
+            engine_running=getattr(CS, 'volt_engine_running', None),
+            profile=self.volt_profile,
+            measured_accel=CS.out.aEgo,
+            preload=personal and self.volt_hold.preload,
+            holding=personal and self.volt_hold.holding,
+            regen_scale=regen_scale,
+            pitch=CC.orientationNED[1] if len(CC.orientationNED) == 3 else 0.)
+        elif volt_longitudinal.enabled(self.CP):
+          self.volt_regen_response.update(0., 0., 0., False, 4 * DT_CTRL)
+
+        # The independent backend authority is installed only from a qualified
+        # startup snapshot. A message flag alone cannot enable brake actuation.
+        request = CC.longitudinalProtection
+        protected = self.protection_gate.update(request, now_nanos, CC.longActive and CC.enabled, CS.out)
+        if protected:
+          self.apply_gas = min(self.apply_gas, self.params.INACTIVE_REGEN)
+          self.apply_brake = max(self.apply_brake, request.brakeFloor)
+          hold_stop = str(request.state) == 'holding' and CS.out.standstill and abs(CS.out.vEgoRaw) < .03
+
         idx = (self.frame // 4) % 4
 
-        at_full_stop = CC.longActive and CS.out.standstill
+        at_full_stop = CC.longActive and hold_stop
         near_stop = CC.longActive and (abs(CS.out.vEgo) < self.params.NEAR_STOP_BRAKE_PHASE)
         friction_brake_bus = CanBus.CHASSIS
         # GM Camera exceptions
