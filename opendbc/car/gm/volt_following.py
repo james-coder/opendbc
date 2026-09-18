@@ -151,13 +151,24 @@ def following_enabled(CP, profile: VoltFollowingProfile = FOLLOWING_PROFILE) -> 
 
 
 def resolve_gap_params(personality, profile: VoltFollowingProfile = FOLLOWING_PROFILE) -> GapParams:
-  """Pure lookup, independently unit-testable without instantiating the MPC/solver."""
+  """Pure lookup, independently unit-testable without instantiating the MPC/solver.
+
+  Uses an equality chain, not a dict keyed by the enum members, on purpose: a
+  LongitudinalPersonality constructed directly in Python (log.LongitudinalPersonality.aggressive)
+  is a plain int, but the same logical value read off a real capnp message (e.g.
+  sm['selfdriveState'].personality, as this is actually called in production) is a
+  capnp._DynamicEnum with a different __hash__ -- `==` between the two is True, but a dict/set
+  `in` check is False, since that only looks at hashes first. A dict lookup here crashed
+  plannerd with NotImplementedError on every single drive once a following_profile was ever
+  set, undetected because the unit tests only ever passed directly-constructed enum values,
+  never a real capnp-message-round-tripped one. gap_params.py's get_T_FOLLOW()/get_jerk_factor()
+  already use this same equality-chain pattern for the identical reason -- this now matches."""
   from cereal import log
-  mapping = {
-    log.LongitudinalPersonality.aggressive: profile.aggressive,
-    log.LongitudinalPersonality.standard: profile.standard,
-    log.LongitudinalPersonality.relaxed: profile.relaxed,
-  }
-  if personality not in mapping:
+  if personality == log.LongitudinalPersonality.aggressive:
+    return profile.aggressive
+  elif personality == log.LongitudinalPersonality.standard:
+    return profile.standard
+  elif personality == log.LongitudinalPersonality.relaxed:
+    return profile.relaxed
+  else:
     raise NotImplementedError("Longitudinal personality not supported")
-  return mapping[personality]

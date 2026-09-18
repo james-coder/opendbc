@@ -75,6 +75,29 @@ def test_resolve_gap_params_maps_each_personality():
   assert resolve_gap_params(log.LongitudinalPersonality.relaxed, FITTED) == FITTED.relaxed
 
 
+@pytest.mark.parametrize('personality,expected', [
+  (log.LongitudinalPersonality.aggressive, 'aggressive'),
+  (log.LongitudinalPersonality.standard, 'standard'),
+  (log.LongitudinalPersonality.relaxed, 'relaxed'),
+])
+def test_resolve_gap_params_works_with_a_real_capnp_message_round_trip(personality, expected):
+  """Regression test for a real production crash: log.LongitudinalPersonality.aggressive
+  constructed directly in Python is a plain int, but the same logical value read off a real
+  capnp message (e.g. sm['selfdriveState'].personality, exactly how this is actually called
+  from long_mpc.py) is a capnp._DynamicEnum with a different __hash__. `==` between the two
+  is True, but a dict/set `in` check is False. A previous dict-based implementation of
+  resolve_gap_params() passed test_resolve_gap_params_maps_each_personality() above (which
+  only ever used directly-constructed values) while crashing plannerd with
+  NotImplementedError on every single real drive with a following_profile active -- this
+  test exists specifically because that one didn't catch it."""
+  msg = log.SelfdriveState.new_message()
+  msg.personality = personality
+  with log.SelfdriveState.from_bytes(msg.to_bytes()) as decoded:
+    wire_value = decoded.personality
+    assert type(wire_value).__name__ == '_DynamicEnum'  # confirms this actually exercises the real bug path
+    assert resolve_gap_params(wire_value, FITTED) == getattr(FITTED, expected)
+
+
 def test_manual_interim_profile_is_valid_and_enabled():
   """The 2026-09-17 hand-reasoned emergency retune (not a data fit) -- must itself pass
   every check any auto-fit would have to pass. Regression coverage for the specific real
